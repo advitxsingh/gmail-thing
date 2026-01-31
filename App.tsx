@@ -263,10 +263,10 @@ const App: React.FC = () => {
 
           {timeline === 'custom' && (
             <div className="time-range-container animate-fade-in">
-              <div className="flex items-start gap-4">
+              <div className="time-slot-group">
                 <div className="time-slot">
-                  <label>Range Start</label>
-                  <div className="time-input-group">
+                  <label>Action Window Start</label>
+                  <div className="time-input-row">
                     <input
                       type="date"
                       value={startDate}
@@ -280,11 +280,11 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="time-separator italic font-light">to</div>
+                <div className="time-divider" />
 
                 <div className="time-slot">
-                  <label>Range End</label>
-                  <div className="time-input-group">
+                  <label>Action Window End</label>
+                  <div className="time-input-row">
                     <input
                       type="date"
                       value={endDate}
@@ -302,12 +302,11 @@ const App: React.FC = () => {
           )}
 
           <Button
-            disabled={!selectedLabelId}
             onClick={startScanning}
-            isLoading={isLoading}
-            className="w-full py-4 text-lg"
+            disabled={isLoading || (timeline === 'custom' && (!startDate || !endDate))}
+            className="scan-btn"
           >
-            Scan Filtered Timeline
+            {isLoading ? 'Scanning Actions...' : 'Analyze Label History'}
           </Button>
         </div>
       )}

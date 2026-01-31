@@ -1,6 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { loadGoogleScripts, initTokenClient, handleAuthClick, listLabels, listMessages, parseMessage, moveToInbox } from './services/gmailService';
-import { analyzeEmailsImportance } from './services/geminiService';
 import { AppState, GmailLabel, EnrichedMessage } from './types';
 import Button from './components/Button';
 import EmailCard from './components/EmailCard';
@@ -11,7 +10,7 @@ const App: React.FC = () => {
   const [selectedLabelId, setSelectedLabelId] = useState<string>('');
   const [emails, setEmails] = useState<EnrichedMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [statusMsg, setStatusMsg] = useState('Initializing...');
+  const [statusMsg, setStatusMsg] = useState('');
 
   const CLIENT_ID = '487017425814-pcueqe95kvbfv8671hc3j36f7ebhd880.apps.googleusercontent.com';
 
@@ -28,7 +27,7 @@ const App: React.FC = () => {
   useEffect(() => {
     loadGoogleScripts(() => {
       setScriptsLoaded(true);
-      setStatusMsg('Ready to connect');
+      setStatusMsg('');
     });
   }, []);
 
@@ -44,16 +43,7 @@ const App: React.FC = () => {
     }
   };
 
-  // Auto-login if scripts are ready
-  useEffect(() => {
-    if (scriptsLoaded) {
-      // Small delay to ensure everything is stable
-      const timer = setTimeout(() => {
-        handleLogin();
-      }, 500);
-      return () => clearTimeout(timer);
-    }
-  }, [scriptsLoaded]);
+  // Auto-login removed as per user request
 
   const fetchLabels = async () => {
     try {
@@ -100,29 +90,56 @@ const App: React.FC = () => {
         afterDateStr = d.toISOString().split('T')[0].replace(/-/g, '/');
       }
 
-      const rawMessages = await listMessages(selectedLabelId, 500, afterDateStr, beforeDateStr);
-      const parsed = rawMessages.map(parseMessage);
+      const selectedLabel = labels.find(l => l.id === selectedLabelId);
+      const labelName = selectedLabel?.name || '';
 
-      parsed.sort((a, b) => b.timestamp - a.timestamp);
+      const scanResult = await listMessages(selectedLabelId, labelName, 30000, afterDateStr, beforeDateStr);
+      const parsed = scanResult.messages.map(m => parseMessage(m, scanResult.historyRange));
 
-      setEmails(parsed);
-      setAppState(AppState.REVIEW_EMAILS);
-      setStatusMsg(`Found ${parsed.length} emails from the selected period.`);
-    } catch (error) {
-      setStatusMsg('Error fetching emails. Please try again.');
+      parsed.sort((a, b) => {
+        // If both were added recently, sort by the action time
+        if (a.labelAddedAt && b.labelAddedAt) return b.labelAddedAt - a.labelAddedAt;
+
+        // If only one was added recently, it stays on top
+        if (a.labelAddedAt && !b.labelAddedAt) return -1;
+        if (!a.labelAddedAt && b.labelAddedAt) return 1;
+
+        // Otherwise sort by original arrival timestamp
+        return b.timestamp - a.timestamp;
+      });
+
+      if (parsed.length === 0) {
+        setStatusMsg("No recent actions found. Checking label contents directly...");
+        // If history found nothing, search the label by name
+        const fallbackRaw = await window.gapi.client.gmail.users.messages.list({
+          userId: 'me',
+          q: `label:"${labelName}"`,
+          maxResults: 50
+        });
+        if (fallbackRaw.result.messages) {
+          const detailPromises = fallbackRaw.result.messages.map((m: any) =>
+            window.gapi.client.gmail.users.messages.get({ userId: 'me', id: m.id, format: 'metadata' })
+          );
+          const details = await Promise.all(detailPromises);
+          const fallbackParsed = details.map(res => parseMessage(res.result));
+          setEmails(fallbackParsed);
+          setStatusMsg(`History scan was empty. Showing last 50 label items instead.`);
+        } else {
+          setEmails([]);
+          setStatusMsg("No emails found in this label at all.");
+        }
+      } else {
+        setEmails(parsed);
+        setStatusMsg(`Found ${parsed.length} emails. Check the "Added @" badges!`);
+      }
+    } catch (error: any) {
+      console.error('Scan failed:', error);
+      setStatusMsg(`Scan Failed: ${error?.message || 'Check your internet or Gmail permissions'}`);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const selectTopN = (n: number) => {
-    const sorted = [...emails].sort((a, b) => b.timestamp - a.timestamp);
-    const topIds = sorted.slice(0, n).map(e => e.id);
-    setEmails(prev => prev.map(e => ({
-      ...e,
-      selected: topIds.includes(e.id)
-    })));
-  };
 
   const toggleSelection = (id: string) => {
     setEmails(prev => prev.map(e => e.id === id ? { ...e, selected: !e.selected } : e));
@@ -141,14 +158,13 @@ const App: React.FC = () => {
     setStatusMsg(`Moving ${toRecover.length} emails to Inbox...`);
 
     try {
-      const ids = toRecover.map(e => e.id);
-      await moveToInbox(ids);
+      const ids = toRecover.flatMap(e => e.allMessageIds);
+      await moveToInbox(ids, selectedLabelId);
 
       // Update UI
       setEmails(prev => prev.filter(e => !ids.includes(e.id)));
       setStatusMsg(`Success! ${toRecover.length} emails recovered to Inbox.`);
-      setAppState(AppState.PROCESSING_RECOVERY); // Could show a success screen, but staying on list is better for batches
-      setTimeout(() => setAppState(AppState.REVIEW_EMAILS), 2000);
+      setTimeout(() => setStatusMsg(''), 5000);
     } catch (error) {
       setStatusMsg('Failed to move emails. Check console.');
     } finally {
@@ -167,12 +183,11 @@ const App: React.FC = () => {
     <div className="max-w-4xl mx-auto p-4 md:p-8">
       {/* Header */}
       <header className="mb-12 text-center">
-        <h1 className="text-4xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent mb-2">
-          Gmail Recovery Assistant
+        <h1 className="text-4xl font-bold text-white mb-2">
+          Gmail WooHehe
         </h1>
-        <p className="text-slate-400">Recover specific emails from accidental mass-archiving using AI.</p>
         {statusMsg && (
-          <div className="mt-4 inline-block px-3 py-1 rounded-full bg-slate-800 text-xs text-indigo-300 border border-indigo-500/30">
+          <div className="mt-4 inline-block px-3 py-1 rounded-full bg-black text-xs text-white border border-white/20">
             {statusMsg}
           </div>
         )}
@@ -180,25 +195,16 @@ const App: React.FC = () => {
 
       {/* View: Auth */}
       {appState === AppState.AUTH_REQUIRED && (
-        <div className="flex flex-col items-center justify-center p-8 bg-slate-800/50 rounded-2xl border border-slate-700 max-w-lg mx-auto">
-          <div className="w-16 h-16 bg-slate-700 rounded-full flex items-center justify-center mb-6">
-            <svg className="w-8 h-8 text-indigo-400" viewBox="0 0 24 24" fill="currentColor">
+        <div className="flex flex-col items-center justify-center p-8 bg-black rounded-2xl border border-white/10 max-w-lg mx-auto">
+          <div className="w-16 h-16 bg-black border border-white/10 rounded-full flex items-center justify-center mb-6">
+            <svg className="w-8 h-8 text-white" viewBox="0 0 24 24" fill="currentColor">
               <path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" />
             </svg>
           </div>
 
-          <h2 className="text-xl font-semibold mb-2">Connect your Gmail</h2>
-          <p className="text-slate-400 text-center text-sm mb-6">
-            You need a Google Cloud OAuth Client ID authorized for: <br />
-            <code className="text-xs bg-slate-900 px-1 py-0.5 rounded text-indigo-300 mt-1 inline-block">{window.location.origin}</code>
-          </p>
+          <h2 className="text-xl font-semibold mb-6">Connect your Gmail</h2>
 
           <div className="w-full space-y-4">
-            <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-700/50 text-center">
-              <p className="text-xs text-slate-400 mb-1">Authorized for</p>
-              <code className="text-sm font-bold text-indigo-300">{window.location.origin}</code>
-            </div>
-
             <Button
               onClick={handleLogin}
               className="w-full py-4 text-lg font-bold"
@@ -212,16 +218,16 @@ const App: React.FC = () => {
 
       {/* View: Select Label */}
       {appState === AppState.SELECT_LABEL && (
-        <div className="flex flex-col max-w-lg mx-auto glass-card animate-fade-in">
-          <h2 className="text-xl font-bold mb-6 text-indigo-300">Phase 1: Filter by Label & Timeline</h2>
+        <div className="flex flex-col max-w-lg mx-auto glass-card animate-fade-in border-white/10">
+          <h2 className="text-xl font-bold mb-6 text-white">Filter by Label & Timeline</h2>
 
-          <label className="block text-sm font-medium text-slate-300 mb-2">
+          <label className="block text-sm font-medium text-white/40 mb-2">
             Which label contains the accidental archives?
           </label>
 
           <div className="relative mb-6">
             <select
-              className="appearance-none w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-4 text-white hover:border-indigo-500 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all cursor-pointer"
+              className="appearance-none w-full bg-black border border-white/10 rounded-xl px-4 py-4 text-white hover:border-white/40 focus:border-white outline-none transition-all cursor-pointer"
               value={selectedLabelId}
               onChange={(e) => setSelectedLabelId(e.target.value)}
             >
@@ -234,7 +240,7 @@ const App: React.FC = () => {
             </select>
           </div>
 
-          <label className="block text-sm font-medium text-slate-300 mb-2">
+          <label className="block text-sm font-medium text-white/40 mb-2">
             When did the filter run? (Limit scan area)
           </label>
           <div className="grid grid-cols-5 gap-2 mb-4">
@@ -248,7 +254,7 @@ const App: React.FC = () => {
               <button
                 key={t.id}
                 onClick={() => setTimeline(t.id as any)}
-                className={`py-2 text-[10px] uppercase tracking-wider font-black rounded-lg border transition-all ${timeline === t.id ? 'bg-indigo-600 border-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'}`}
+                className={`py-2 text-[10px] uppercase tracking-wider font-black rounded-lg border transition-all ${timeline === t.id ? 'bg-white text-black border-white' : 'bg-black border-white/10 text-white hover:border-white/40'}`}
               >
                 {t.label}
               </button>
@@ -256,46 +262,40 @@ const App: React.FC = () => {
           </div>
 
           {timeline === 'custom' && (
-            <div className="space-y-4 mb-8 p-4 bg-slate-900/50 rounded-xl border border-slate-800 animate-fade-in text-left">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-[10px] uppercase font-bold text-slate-500 mb-2">From Date</label>
-                  <input
-                    type="date"
-                    value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
-                    className="!py-2 !px-3 font-medium text-xs bg-slate-800 border-slate-700"
-                  />
+            <div className="time-range-container animate-fade-in">
+              <div className="flex items-start gap-4">
+                <div className="time-slot">
+                  <label>Range Start</label>
+                  <div className="time-input-group">
+                    <input
+                      type="date"
+                      value={startDate}
+                      onChange={(e) => setStartDate(e.target.value)}
+                    />
+                    <input
+                      type="time"
+                      value={startTime}
+                      onChange={(e) => setStartTime(e.target.value)}
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-[10px] uppercase font-bold text-slate-500 mb-2">From Time</label>
-                  <input
-                    type="time"
-                    value={startTime}
-                    onChange={(e) => setStartTime(e.target.value)}
-                    className="!py-2 !px-3 font-medium text-xs bg-slate-800 border-slate-700"
-                  />
-                </div>
-              </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-[10px] uppercase font-bold text-slate-500 mb-2">To Date</label>
-                  <input
-                    type="date"
-                    value={endDate}
-                    onChange={(e) => setEndDate(e.target.value)}
-                    className="!py-2 !px-3 font-medium text-xs bg-slate-800 border-slate-700"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] uppercase font-bold text-slate-500 mb-2">To Time</label>
-                  <input
-                    type="time"
-                    value={endTime}
-                    onChange={(e) => setEndTime(e.target.value)}
-                    className="!py-2 !px-3 font-medium text-xs bg-slate-800 border-slate-700"
-                  />
+                <div className="time-separator italic font-light">to</div>
+
+                <div className="time-slot">
+                  <label>Range End</label>
+                  <div className="time-input-group">
+                    <input
+                      type="date"
+                      value={endDate}
+                      onChange={(e) => setEndDate(e.target.value)}
+                    />
+                    <input
+                      type="time"
+                      value={endTime}
+                      onChange={(e) => setEndTime(e.target.value)}
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -317,45 +317,41 @@ const App: React.FC = () => {
         <div className="flex flex-col h-[700px] gap-6 animate-fade-in">
 
           {/* Recovery Stats Card */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="glass-card !p-4 flex flex-col items-center justify-center">
-              <span className="text-slate-400 text-xs uppercase font-bold tracking-wider mb-1">Found in Label</span>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="glass-card !p-4 flex flex-col items-center justify-center bg-black border-white/10">
+              <span className="text-white/50 text-xs uppercase font-bold tracking-wider mb-1">Found in Label</span>
               <span className="text-2xl font-black text-white">{emails.length}</span>
             </div>
-            <div className="glass-card !p-4 flex flex-col items-center justify-center border-indigo-500/30">
-              <span className="text-indigo-300 text-xs uppercase font-bold tracking-wider mb-1">Target for Recovery</span>
-              <span className="text-2xl font-black text-indigo-400">~80</span>
-            </div>
-            <div className="glass-card !p-4 flex flex-col items-center justify-center border-green-500/30">
-              <span className="text-green-300 text-xs uppercase font-bold tracking-wider mb-1">Currently Selected</span>
-              <span className="text-2xl font-black text-green-400">{selectedCount}</span>
+            <div className="glass-card !p-4 flex flex-col items-center justify-center border-white/10">
+              <span className="text-white/50 text-xs uppercase font-bold tracking-wider mb-1">Currently Selected</span>
+              <span className="text-2xl font-black text-white">{selectedCount}</span>
             </div>
           </div>
 
           {/* Timeline Control Center */}
-          <div className="glass-card !p-6 border-indigo-500/20 bg-gradient-to-br from-indigo-900/10 to-transparent">
-            <h3 className="text-sm font-bold text-slate-300 mb-4 flex items-center gap-2">
+          <div className="glass-card !p-6 border-white/10 bg-black">
+            <h3 className="text-sm font-bold text-white/60 mb-4 flex items-center gap-2">
               <span className="text-lg">🕒</span> Timeline Controller
             </h3>
 
             <div className="flex flex-wrap gap-2">
               <button
-                className="text-[11px] px-3 py-1.5 rounded-full font-bold bg-indigo-600 text-white shadow-lg shadow-indigo-500/20 cursor-default"
+                className="text-[11px] px-3 py-1.5 rounded-full font-bold bg-black text-white border border-white/10 cursor-default"
               >
                 SORTING BY LATEST
               </button>
 
-              <div className="h-4 w-[1px] bg-slate-700 mx-2 self-center"></div>
+              <div className="h-4 w-[1px] bg-white/10 mx-2 self-center"></div>
 
               <button
-                onClick={() => selectTopN(80)}
-                className="text-[11px] px-4 py-1.5 rounded-full bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 border border-amber-500/30 transition-all font-black uppercase tracking-wider"
+                onClick={() => selectAll()}
+                className="text-[11px] px-4 py-1.5 rounded-full bg-white text-black hover:bg-neutral-200 transition-all font-black uppercase tracking-wider"
               >
-                SELECT TOP 80 (RECENT)
+                SELECT ALL
               </button>
               <button
                 onClick={() => setAppState(AppState.SELECT_LABEL)}
-                className="text-[11px] px-3 py-1.5 rounded-full bg-slate-800 text-slate-400 hover:text-white border border-slate-700 transition-all font-bold ml-auto"
+                className="text-[11px] px-3 py-1.5 rounded-full bg-black text-white/40 hover:text-white border border-white/10 transition-all font-bold ml-auto"
               >
                 CHANGE TIMELINE
               </button>
@@ -365,15 +361,15 @@ const App: React.FC = () => {
           {/* Email List Header */}
           <div className="flex items-center justify-between px-2">
             <div className="flex items-center gap-4">
-              <h4 className="text-sm font-bold text-slate-400 uppercase tracking-widest">Matches</h4>
-              <div className="text-xs text-slate-500">Showing {emails.length} items</div>
+              <h4 className="text-sm font-bold text-white/30 uppercase tracking-widest">Matches</h4>
+              <div className="text-xs text-white/20">Showing {emails.length} items</div>
             </div>
             <div className="flex gap-2">
-              <Button variant="ghost" onClick={selectAll} className="text-[11px] uppercase font-bold tracking-widest">
+              <Button variant="ghost" onClick={selectAll} className="text-[11px] uppercase font-bold tracking-widest text-neutral-400 hover:text-white">
                 {emails.length > 0 && emails.every(e => e.selected) ? "Clear All" : "Select All"}
               </Button>
               {selectedCount > 0 && (
-                <Button onClick={handleRecover} isLoading={isLoading} className="!h-8 !px-4 !text-[11px] !bg-green-600 hover:!bg-green-500 rounded-full shadow-lg shadow-green-500/20 text-white font-bold uppercase tracking-widest">
+                <Button onClick={handleRecover} isLoading={isLoading} className="!h-8 !px-4 !text-[11px] !bg-white !text-black hover:!bg-neutral-200 rounded-full border-none font-bold uppercase tracking-widest">
                   Recover {selectedCount} to Inbox
                 </Button>
               )}
@@ -383,15 +379,15 @@ const App: React.FC = () => {
           {/* List Section */}
           <div className="flex-1 overflow-y-auto pr-2 space-y-3 min-h-0 custom-scrollbar pb-8">
             {isLoading && emails.length === 0 ? (
-              <div className="h-64 flex flex-col items-center justify-center text-slate-500 glass-card">
-                <div className="w-12 h-12 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-4"></div>
+              <div className="h-64 flex flex-col items-center justify-center text-white glass-card">
+                <div className="w-12 h-12 border-4 border-white/10 border-t-white rounded-full animate-spin mb-4"></div>
                 <p className="animate-pulse">Retrieving label content...</p>
               </div>
             ) : sortedEmails.length === 0 ? (
-              <div className="h-64 flex flex-col items-center justify-center text-slate-500 glass-card">
+              <div className="h-64 flex flex-col items-center justify-center text-white glass-card">
                 <div className="text-4xl mb-4">🔍</div>
                 <p>No matches found in this label.</p>
-                <button onClick={() => setAppState(AppState.SELECT_LABEL)} className="text-indigo-400 hover:underline mt-4 font-bold text-xs uppercase tracking-widest transition-all">← Choose different label</button>
+                <button onClick={() => setAppState(AppState.SELECT_LABEL)} className="text-white underline mt-4 font-bold text-xs uppercase tracking-widest transition-all">← Choose different label</button>
               </div>
             ) : (
               sortedEmails.map(email => (

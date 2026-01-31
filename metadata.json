@@ -1,0 +1,5 @@
+{
+  "name": "Gmail Recovery Assistant",
+  "description": "A smart tool to help recover accidentally archived emails using Gmail API for retrieval and Gemini AI for intelligent filtering.",
+  "requestFramePermissions": []
+}
